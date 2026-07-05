@@ -1,18 +1,21 @@
-from enum import Enum
-from datetime import datetime, timezone
 import re
-from pydantic import BaseModel, Field, field_validator
+from enum import Enum
+from pydantic import BaseModel, Field, model_validator
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
 
+_FQDN_REGEX = re.compile(r"^(?=.{4,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$", re.IGNORECASE)
+_IPV4_REGEX = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
 
 def get_utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-
-_FQDN = re.compile(
-    r"^(?=.{4,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$",
-    re.IGNORECASE,
-)
-
+class TargetType(str, Enum):
+    DOMAIN = "domain"
+    IP = "ip"
+    EMAIL = "email"
+    USERNAME = "username"
+    PERSON = "person"
 
 class ProviderStatus(str, Enum):
     OK = "ok"
@@ -21,25 +24,38 @@ class ProviderStatus(str, Enum):
     NOT_FOUND = "not_found"
     ERROR = "error"
 
-
-class TargetDomain(BaseModel):
-    domain_name: str = Field(..., min_length=4, max_length=253)
+class InvestigationTarget(BaseModel):
+    value: str = Field(..., description="The raw target string from the omnibox")
+    target_type: Optional[TargetType] = Field(None, description="Auto-detected type")
     submitted_at: datetime = Field(default_factory=get_utc_now)
 
-    @field_validator("domain_name")
-    @classmethod
-    def must_be_fqdn(cls, v: str) -> str:
-        v = v.strip().lower().rstrip(".")
-        if not _FQDN.match(v):
-            raise ValueError("not a valid fully-qualified domain name")
-        return v
-
+    @model_validator(mode='after')
+    def classify_target(self) -> 'InvestigationTarget':
+        """
+        The intelligence layer: automatically detects what the user typed.
+        """
+        v = self.value.strip().lower()
+        self.value = v  # Normalize the input
+        
+        # 1. Deterministic Checks
+        if _IPV4_REGEX.match(v):
+            self.target_type = TargetType.IP
+        elif "@" in v and "." in v.split("@")[1]:
+            self.target_type = TargetType.EMAIL
+        elif _FQDN_REGEX.match(v):
+            self.target_type = TargetType.DOMAIN
+        # 2. Heuristic Checks
+        elif " " in v:
+            self.target_type = TargetType.PERSON
+        else:
+            self.target_type = TargetType.USERNAME
+            
+        return self
 
 class OSINTResult(BaseModel):
     source_module: str
     target: str
     status: ProviderStatus = ProviderStatus.OK
-    raw_data: dict = Field(default_factory=dict)
+    raw_data: Dict[str, Any] = Field(default_factory=dict)
     risk_score: int = Field(0, ge=0, le=100)
-    error_message: str | None = None
-    collected_at: datetime = Field(default_factory=get_utc_now)
+    error_message: Optional[str] = None
