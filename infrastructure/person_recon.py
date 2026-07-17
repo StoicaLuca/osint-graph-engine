@@ -1,59 +1,59 @@
 import httpx
 from typing import List
-from infrastructure.base import OSINTProvider
+from core.providers.base import OSINTProvider
 from core.models import OSINTResult, ProviderStatus, TargetType
+
 
 class PersonReconProvider(OSINTProvider):
     """
-    Queries open metadata indices to locate verifiable, factual 
-    public records, citations, or cross-referenced document footprints.
+    A person name is a SEED, not a lookup. Returns candidate public entities from a
+    structured open source (Wikidata) that MATCH the name and REQUIRE human verification.
+    It never claims the matches ARE the target person. Honest labeling is the point.
     """
-    
+
     @property
     def supported_types(self) -> List[TargetType]:
         return [TargetType.PERSON]
-    
+
     async def analyze(self, target_value: str, target_type: TargetType) -> OSINTResult:
-        sanitized_name = target_value.replace(" ", "+")
-        url = f"https://api.crossref.org/works?query={sanitized_name}&rows=3"
-        
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        params = {
+            "action": "wbsearchentities",
+            "search": target_value,
+            "language": "en",
+            "format": "json",
+            "limit": 7,
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
             try:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-                
-                items = data.get("message", {}).get("items", [])
-                public_records = []
-                
-                for item in items:
-                    public_records.append({
-                        "title": item.get("title", ["Unknown Title"])[0],
-                        "publisher": item.get("publisher", "Public Record Source"),
-                        "recorded_date": item.get("created", {}).get("date-time", "Unknown Date"),
-                        "resource_link": item.get("URL", "No link available")
-                    })
-                    
-                if not public_records:
-                    return OSINTResult(
-                        source_module="Person Recon",
-                        target=target_value,
-                        status=ProviderStatus.NOT_FOUND,
-                        error_message="No explicit public references found in primary data indices."
-                    )
-                    
+                r = await client.get("https://www.wikidata.org/w/api.php", params=params)
+                r.raise_for_status()
+                hits = r.json().get("search", [])
+            except httpx.HTTPError as e:
                 return OSINTResult(
-                    source_module="Person Recon",
-                    target=target_value,
-                    status=ProviderStatus.OK,
-                    raw_data={"verifiable_public_mentions": public_records},
-                    risk_score=15
+                    source_module="Person Recon (Wikidata)", target=target_value,
+                    status=ProviderStatus.ERROR, error_message=str(e),
                 )
-                
-            except Exception as e:
-                return OSINTResult(
-                    source_module="Person Recon",
-                    target=target_value,
-                    status=ProviderStatus.ERROR,
-                    error_message=f"Public intelligence registry query failed: {str(e)}"
-                )
+
+        # Extract only the useful fields from each raw Wikidata hit.
+        candidates = [
+            {
+                "label": h.get("label"),
+                "description": h.get("description"),
+                "wikidata_id": h.get("id"),
+                "url": h.get("concepturi"),
+            }
+            for h in hits
+        ]
+
+        if not candidates:
+            return OSINTResult(
+                source_module="Person Recon (Wikidata)", target=target_value,
+                status=ProviderStatus.NOT_FOUND,
+                error_message="No matching public entities (name may not be notable/registered).",
+            )
+
+        return OSINTResult(
+            source_module="Person Recon (Wikidata)", target=target_value,
+            status=ProviderStatus.OK,
+            raw_data={"candidate_entities_unverified": candidates},
+        )
