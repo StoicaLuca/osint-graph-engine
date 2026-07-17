@@ -7,5 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.139.0",
     "httpx>=0.28.1",
+    "neo4j>=6.2.0",
+    "python-dotenv>=1.2.2",
     "uvicorn>=0.50.0",
 ]
