@@ -16,6 +16,7 @@ class TargetType(str, Enum):
     EMAIL = "email"
     USERNAME = "username"
     PERSON = "person"
+    UNKNOWN = "unknown"
 
 class ProviderStatus(str, Enum):
     OK = "ok"
@@ -31,25 +32,28 @@ class InvestigationTarget(BaseModel):
 
     @model_validator(mode='after')
     def classify_target(self) -> 'InvestigationTarget':
-        """
-        The intelligence layer: automatically detects what the user typed.
-        """
         v = self.value.strip().lower()
-        self.value = v  # Normalize the input
-        
-        # 1. Deterministic Checks
+        self.value = v
+
+        # 1. IP: strict four-octet form
         if _IPV4_REGEX.match(v):
             self.target_type = TargetType.IP
-        elif "@" in v and "." in v.split("@")[1]:
+        # 2. Email: exactly one @, and a valid-looking domain after it
+        elif v.count("@") == 1 and _FQDN_REGEX.match(v.split("@")[1]):
             self.target_type = TargetType.EMAIL
-        elif _FQDN_REGEX.match(v):
+        # 3. Domain: FQDN shape, no @
+        elif "@" not in v and _FQDN_REGEX.match(v):
             self.target_type = TargetType.DOMAIN
-        # 2. Heuristic Checks
-        elif " " in v:
+        # 4. Person: has a space (a name), no @
+        elif " " in v and "@" not in v:
             self.target_type = TargetType.PERSON
-        else:
+        # 5. Username: a single clean handle — letters/digits/._- only, no @, no space
+        elif re.fullmatch(r"[a-z0-9._-]{1,39}", v):
             self.target_type = TargetType.USERNAME
-            
+        # 6. Anything else is unclassifiable
+        else:
+            self.target_type = TargetType.UNKNOWN
+
         return self
 
 class OSINTResult(BaseModel):

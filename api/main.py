@@ -5,9 +5,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 
-from core.models import InvestigationTarget, ProviderStatus
-# 1. Import our database manager
-from core.database import db 
+from core.models import InvestigationTarget, ProviderStatus, TargetType
+from core.database import db
 
 from infrastructure.crtsh import CrtShProvider
 from infrastructure.ipwhois import IPWhoisProvider
@@ -15,42 +14,41 @@ from infrastructure.email_gravatar import GravatarProvider
 from infrastructure.username_scanner import UsernameScannerProvider
 from infrastructure.person_recon import PersonReconProvider
 
-# 2. Define the Application Lifespan
+
+# --- Application lifespan: run once at startup and once at shutdown ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- STARTUP LOGIC ---
     print("Starting OSINT Engine...")
-    await db.connect()  # Initialize the database connection pool
-    
-    yield  # This tells FastAPI: "The setup is done, start accepting HTTP requests now."
-    
-    # --- SHUTDOWN LOGIC ---
+    await db.connect()          # open the Neo4j connection pool
+    yield                       # setup done, start accepting requests
     print("Shutting down OSINT Engine...")
-    await db.close()  # Cleanly close all database connections
+    await db.close()            # cleanly close all DB connections
 
 
-# 3. Pass the lifespan to the FastAPI initialization
 app = FastAPI(
-    title="OSINT Attribution Engine", 
+    title="OSINT Attribution Engine",
     version="0.4.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
+# The universal roster: every provider the router can dispatch to.
 PROVIDERS = [
     CrtShProvider(),
     IPWhoisProvider(),
     GravatarProvider(),
     UsernameScannerProvider(),
-    PersonReconProvider()
+    PersonReconProvider(),
 ]
 
+# In-memory job store (results live here until the request cycle ends).
 JOBS: Dict[str, Dict[str, Any]] = {}
 
-async def run_investigation(job_id: str, target: InvestigationTarget):
-    JOBS[job_id]["status"] = "processing"
-    
-    pending_tasks = []
 
+async def run_investigation(job_id: str, target: InvestigationTarget):
+    """Background worker: runs every matching provider concurrently."""
+    JOBS[job_id]["status"] = "processing"
+
+    pending_tasks = []
     for provider in PROVIDERS:
         if target.target_type in provider.supported_types:
             task = provider.analyze(target.value, target.target_type)
@@ -60,11 +58,12 @@ async def run_investigation(job_id: str, target: InvestigationTarget):
 
     clean_results = []
     for res in raw_results:
+        # Safety net: a provider crash returns an Exception object, not an OSINTResult.
         if isinstance(res, Exception):
             clean_results.append({
                 "source_module": "System Architecture",
                 "status": ProviderStatus.ERROR,
-                "error_message": f"Critical task failure: {str(res)}"
+                "error_message": f"Critical task failure: {str(res)}",
             })
         else:
             clean_results.append(res.model_dump())
@@ -75,20 +74,27 @@ async def run_investigation(job_id: str, target: InvestigationTarget):
 
 @app.post("/api/v1/investigate", tags=["Investigation"])
 async def start_investigation(target: InvestigationTarget, bg_tasks: BackgroundTasks):
+    # Reject anything we couldn't classify, instead of running an empty investigation.
+    if target.target_type == TargetType.UNKNOWN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot classify '{target.value}' as a domain, IP, email, username or person.",
+        )
+
     job_id = str(uuid4())
     JOBS[job_id] = {
         "status": "pending",
         "target": target.value,
-        "detected_type": target.target_type, 
-        "results": []
+        "detected_type": target.target_type,
+        "results": [],
     }
-    
+
     bg_tasks.add_task(run_investigation, job_id, target)
-    
+
     return {
-        "job_id": job_id, 
-        "detected_type": target.target_type, 
-        "status": "pending"
+        "job_id": job_id,
+        "detected_type": target.target_type,
+        "status": "pending",
     }
 
 
