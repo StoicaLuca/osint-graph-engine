@@ -13,17 +13,24 @@ from infrastructure.ipwhois import IPWhoisProvider
 from infrastructure.email_gravatar import GravatarProvider
 from infrastructure.username_scanner import UsernameScannerProvider
 from infrastructure.person_recon import PersonReconProvider
+from core.ingestion import ingest_result
+from infrastructure.certspotter import CertSpotterProvider
+from infrastructure.hackertarget import HackerTargetProvider
 
 
 # --- Application lifespan: run once at startup and once at shutdown ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting OSINT Engine...")
-    await db.connect()          # open the Neo4j connection pool
-    yield                       # setup done, start accepting requests
+    await db.connect()
+    try:
+        await db.init_schema()
+    except Exception as e:
+        # The app still boots without the database; graph features just stay inert.
+        print(f"WARNING: Neo4j unreachable, graph features disabled ({e})")
+    yield
     print("Shutting down OSINT Engine...")
-    await db.close()            # cleanly close all DB connections
-
+    await db.close()
 
 app = FastAPI(
     title="OSINT Attribution Engine",
@@ -34,6 +41,8 @@ app = FastAPI(
 # The universal roster: every provider the router can dispatch to.
 PROVIDERS = [
     CrtShProvider(),
+    CertSpotterProvider(),
+    HackerTargetProvider(),
     IPWhoisProvider(),
     GravatarProvider(),
     UsernameScannerProvider(),
@@ -66,7 +75,13 @@ async def run_investigation(job_id: str, target: InvestigationTarget):
                 "error_message": f"Critical task failure: {str(res)}",
             })
         else:
-            clean_results.append(res.model_dump())
+            result_dict = res.model_dump()
+            clean_results.append(result_dict)
+            try:
+                await ingest_result(target.value, result_dict)
+            except Exception as e:
+                # A database failure must not destroy the investigation results.
+                print(f"WARNING: graph ingestion failed ({e})")
 
     JOBS[job_id]["status"] = "completed"
     JOBS[job_id]["results"] = clean_results
